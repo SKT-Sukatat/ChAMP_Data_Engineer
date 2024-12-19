@@ -46,7 +46,7 @@ def print_success():
 @dag(default_args=default_args, start_date=days_ago(1), tags=['Traffy'])
 def traffy_pipeline():
     # Create task
-    etl_traffy_data_task = etl_traffy_data(output_path= '/opt/Airflow/dags/')
+    etl_traffy_data_task = etl_traffy_data(output_path= '/opt/airflow/dags/')
 
     print_load_success = print_success()
 
