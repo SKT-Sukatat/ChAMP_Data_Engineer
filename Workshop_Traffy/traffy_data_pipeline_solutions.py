@@ -5,11 +5,11 @@ from airflow.exceptions import AirflowFailException
 
 import pandas as pd
 from datetime import datetime, timedelta
-import requests
-from io import StringIO
+import os
+
 
 # Define Input Path
-TRAFFY_RECORDS_API = "https://publicapi.traffy.in.th/dump-csv-chadchart/bangkok_traffy.csv"
+TRAFFY_RECORDS_API = "https://storage.googleapis.com/traffy-de-workshop/bangkok_traffy.parquet"
 
 # Define default arguments
 default_args = {
@@ -23,74 +23,80 @@ default_args = {
 # Define the today date
 today_date = datetime.now().strftime("%d_%m_%Y")
 
-# Define a Pydantic model for your schema
-class TraffySchema(BaseModel):
-    ticket_id: object
-    type: object
-    organization: object
-    comment: object
-    photo: object
-    photo_after: object
-    coords: object
-    address: object
-    subdistrict: object
-    district: object
-    province: object
-    timestamp: object
-    state: object
-    star: float
-    count_reopen: int
-    last_activity: object
-            
+
+@task()
+def create_folder_if_not_exists(folder_path):
+    """Creates a folder if it doesn't already exist.
+
+    Args:
+        folder_path: The path to the folder to create.
+    """
+    if not os.path.exists(folder_path):
+        try:
+            os.makedirs(folder_path)
+            print(f"Created folder: {folder_path}")
+        except OSError as e:
+            print(f"Error creating folder: {folder_path}. {e}")
+    else:
+        print(f"Folder already exists: {folder_path}")
+
 
 @task()
 def save_raw_data(output_path):
-    df_traffy_raw = pd.read_csv(TRAFFY_RECORDS_API)
+    df_traffy_raw = pd.read_parquet(TRAFFY_RECORDS_API)
     # Declare file name of the raw data
-    parquet_filename = "traffy_raw_data_" + today_date + ".parquet"
+    parquet_filename = "traffy_raw_" + today_date + ".parquet"
     # Export the DataFrame to a Parquet file
-    df_traffy_raw.to_parquet(output_path + parquet_filename, engine="pyarrow", index=False)
+    df_traffy_raw.to_parquet(output_path + parquet_filename, compression="zstd", index=False)
 
 
 @task()
-def validate_columns(input_path):
-    # Load the Parquet file (replace with your actual file path or file source)
-    parquet_filename = "traffy_raw_data_" + today_date + ".parquet"
-    df = pd.read_parquet(input_path + parquet_filename)
+def check_schema(input_path):
+    # Extract Traffy Data from API
+    df_traffy_raw = pd.read_parquet(input_path)
 
-    # Get required columns from the Pydantic model
-    required_columns = set(TraffySchema.__fields__.keys())
-    file_columns = set(df.columns)
+    # Check if the DataFrame has exactly the same columns
+    actual_columns = set(df_traffy_raw.columns)
 
-    # Check for missing or extra columns
-    missing_columns = required_columns - file_columns
+    # Define all required columns as a set
+    required_columns_set = {'ticket_id', 'type', 'organization', 'comment', 'photo', 'photo_after',
+                            'coords', 'address', 'subdistrict', 'district', 'province', 'timestamp',
+                            'state', 'star', 'count_reopen', 'last_activity'}
 
-    if missing_columns:
-        raise AirflowFailException(f"Missing columns: {missing_columns}")
+    if actual_columns == required_columns_set:
+        print("The DataFrame has exactly the required columns.")
     else:
-        print("All required columns are present.")
+        extra_columns = actual_columns - required_columns_set
+        missing_columns = required_columns_set - actual_columns
+        if missing_columns:
+            print(f"The DataFrame is missing these columns: {missing_columns}")
+            raise AirflowFailException(f"Missing columns: {missing_columns}")
+
+        if extra_columns:
+            print(f"The DataFrame has extra columns: {extra_columns}")
+            raise AirflowFailException(f"Missing columns: {extra_columns}")
 
 
 @task()
 def etl_traffy_data(input_path, output_path):
-    df_traffy = pd.read_parquet(input_path + "/traffy_raw_data_" + today_date + ".parquet")
+    df_traffy_raw = pd.read_parquet(f"{input_path}traffy_raw_{today_date}.parquet")
     
     # Requirement 1: Fitler only Bangkok
-    df_traffy = df_traffy[(df_traffy['province'] == 'กรุงเทพมหานคร') | (df_traffy['province'] == 'จังหวัดกรุงเทพมหานคร')]
-    df_traffy['province'] = df_traffy['province'].replace('จังหวัดกรุงเทพมหานคร', 'กรุงเทพมหานคร')
+    df_traffy_cleaned = df_traffy_raw[(df_traffy_raw['province'] == 'กรุงเทพมหานคร') | (df_traffy_raw['province'] == 'จังหวัดกรุงเทพมหานคร')]
+    df_traffy_cleaned['province'] = df_traffy_cleaned['province'].replace('จังหวัดกรุงเทพมหานคร', 'กรุงเทพมหานคร')
     
     # Requirement 2: Fitler only State of Cases
     # Define the allowed states
     allowed_states = ["finish", "inprogress", "forward", "follow", "irrelevant", "start"]
 
     # filter rows with valid states only
-    df_traffy = df_traffy[df_traffy["state"].isin(allowed_states)]
+    df_traffy_cleaned = df_traffy_cleaned[df_traffy_cleaned["state"].isin(allowed_states)]
 
     # Requirement 3: Sorted data by timestamp
-    df_traffy = df_traffy.sort_values(by='timestamp', ascending = False)
+    df_traffy_cleaned = df_traffy_cleaned.sort_values(by='timestamp', ascending = False)
 
     # Load Data as Parquet File to Storage
-    df_traffy.to_parquet(output_path + 'cleaned_traffy_' + today_date +'.parquet')
+    df_traffy_cleaned.to_parquet(f"{output_path}/traffy_cleaned_{today_date}.parquet", compression="zstd", index=False)
 
 
 @task()
@@ -100,17 +106,24 @@ def print_success():
 
 @dag(default_args=default_args, start_date=days_ago(1), tags=['Traffy'])
 def traffy_pipeline():
-    # Create task
-    save_raw_data_task = save_raw_data(output_path= '/opt/airflow/dags/traffy_data/')
+    # Define Folders
+    raw_data_folder = '/opt/airflow/dags/traffy_data/raw/'
+    cleaned_data_folder = '/opt/airflow/dags/traffy_data/cleaned/'
 
-    etl_traffy_data_task = etl_traffy_data(input_path= '/opt/airflow/dags/traffy_data/', output_path= '/opt/airflow/dags/traffy_data/')
+    # Create task
+    create_raw_folder_task = create_folder_if_not_exists(folder_path=raw_data_folder)
+    create_cleaned_folder_task = create_folder_if_not_exists(folder_path=cleaned_data_folder)
+
+    save_raw_data_task = save_raw_data(output_path=raw_data_folder)
+
+    check_schema_task = check_schema(input_path=raw_data_folder)
+
+    etl_traffy_data_task = etl_traffy_data(input_path=raw_data_folder, output_path=cleaned_data_folder)
 
     print_load_success = print_success()
 
-    validate_columns_task = validate_columns(input_path= '/opt/airflow/dags/traffy_data/')
-
     # Crate Task Dependency (Create DAG)
-    save_raw_data_task >> validate_columns_task >> etl_traffy_data_task >> print_load_success
+    [create_raw_folder_task, create_cleaned_folder_task] >> save_raw_data_task >> check_schema_task >> etl_traffy_data_task >> print_load_success
 
 
 traffy_pipeline()
