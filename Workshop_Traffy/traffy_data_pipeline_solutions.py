@@ -87,7 +87,7 @@ def etl_traffy_data(input_path, output_path):
     
     # Requirement 2: Fitler only State of Cases
     # Define the allowed states
-    allowed_states = ["finish", "inprogress", "forward", "follow", "irrelevant", "start"]
+    allowed_states = ["เสร็จสิ้น", "กำลังดำเนินการ", "รอรับเรื่อง"]
 
     # filter rows with valid states only
     df_traffy_cleaned = df_traffy_cleaned[df_traffy_cleaned["state"].isin(allowed_states)]
