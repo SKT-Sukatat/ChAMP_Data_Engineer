@@ -75,12 +75,6 @@ def load(total_order_value: float):
 
 # [END load]
 
-# [START main_flow]
-# order_data = extract()
-# order_summary = transform(order_data)
-# load(order_summary["total_order_value"])
-# [END main_flow]
-
 
 @task()
 def print_finished():
